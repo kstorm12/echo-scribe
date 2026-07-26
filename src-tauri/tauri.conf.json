@@ -48,7 +48,9 @@
       "resources/tray_recording.png",
       "resources/tray_recording_dark.png",
       "resources/tray_transcribing.png",
-      "resources/tray_transcribing_dark.png"
+      "resources/tray_transcribing_dark.png",
+      "resources/tray_thinking.png",
+      "resources/tray_thinking_dark.png"
     ],
     "icon": [
       "icons/32x32.png",

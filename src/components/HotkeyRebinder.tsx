@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  getHotkeyProblems,
   getVoiceAtCursorBinding,
   updateVoiceAtCursorBinding,
   type JsBinding,
@@ -25,6 +26,9 @@ type Props = {
   /// voice-at-cursor binding for backwards compatibility.
   load?: () => Promise<JsBinding>;
   save?: (b: JsBinding) => Promise<void>;
+  /// Action slug used to match this rebinder against `getHotkeyProblems()`
+  /// entries. Defaults to voice-at-cursor, matching `load`/`save`.
+  action?: string;
 };
 
 function buildBinding(
@@ -58,15 +62,33 @@ function buildBinding(
   return { primary: primaryCode, modifiers };
 }
 
-export default function HotkeyRebinder({ onChange, load, save }: Props) {
+export default function HotkeyRebinder({
+  onChange,
+  load,
+  save,
+  action = "voice-at-cursor",
+}: Props) {
   const [current, setCurrent] = useState<JsBinding | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [capture, setCapture] = useState<CaptureState>({ kind: "idle" });
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
 
   const loader = load ?? getVoiceAtCursorBinding;
   const saver = save ?? updateVoiceAtCursorBinding;
+
+  // Whether the OS accepted this shortcut. On Windows a combination another
+  // app already owns fails to register, and without this the app looks healthy
+  // while the hotkey does nothing at all.
+  const refreshProblem = async () => {
+    try {
+      const problems = await getHotkeyProblems();
+      setProblem(problems.find((p) => p.action === action)?.message ?? null);
+    } catch {
+      // Diagnostics only — never block the rebinder on this.
+    }
+  };
 
   // Load current binding on mount
   useEffect(() => {
@@ -79,6 +101,7 @@ export default function HotkeyRebinder({ onChange, load, save }: Props) {
         if (!cancelled)
           setLoadError(e instanceof Error ? e.message : String(e));
       }
+      if (!cancelled) await refreshProblem();
     })();
     return () => {
       cancelled = true;
@@ -152,6 +175,9 @@ export default function HotkeyRebinder({ onChange, load, save }: Props) {
       setCurrent(capture.binding);
       onChange?.(capture.binding);
       setCapture({ kind: "idle" });
+      // The backend re-registers on save, so ask whether the new combination
+      // was actually accepted by the OS.
+      await refreshProblem();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setSaveError(`Unsupported key — try a different one. (${msg})`);
@@ -229,6 +255,9 @@ export default function HotkeyRebinder({ onChange, load, save }: Props) {
         )}
       </div>
 
+      {problem && capture.kind === "idle" ? (
+        <p className="mt-2 text-xs text-warning">{problem}</p>
+      ) : null}
       {saveError ? (
         <p className="mt-2 text-xs text-warning">{saveError}</p>
       ) : null}

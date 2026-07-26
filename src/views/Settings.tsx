@@ -336,6 +336,7 @@ function LogCapturePage() {
         subtitle="Hold this key combination to capture a thought, idea, or task — classified locally and saved to your log."
       >
         <HotkeyRebinder
+          action="log-capture"
           load={getLogCaptureBinding}
           save={updateLogCaptureBinding}
         />
@@ -1773,6 +1774,7 @@ function AppLauncherSettingsSection() {
             </div>
             <div className="mt-1">
               <HotkeyRebinder
+                action="action"
                 load={getActionBinding}
                 save={updateActionBinding}
               />
@@ -1789,6 +1791,7 @@ function AppLauncherSettingsSection() {
             </div>
             <div className="mt-1">
               <HotkeyRebinder
+                action="edit-selection"
                 load={getEditSelectionBinding}
                 save={updateEditSelectionBinding}
               />

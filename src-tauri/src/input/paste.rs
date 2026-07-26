@@ -132,6 +132,12 @@ fn synthesize_cmd_v() -> Result<(), PasteError> {
 /// Cmd+C, return the selected text — or `None` if the clipboard did not change
 /// (which we treat as "nothing was selected"). Kept pure so it is unit-testable
 /// without a live app.
+///
+/// ⚠️ Unsound when `before` is `None`: a failed pre-read makes *any* stale
+/// clipboard content compare as "changed". Prefer
+/// [`selection_from_sentinel`], which does not depend on reading the
+/// user's clipboard at all. Retained because it is the right check when the
+/// pre-read is known to have succeeded.
 pub fn selection_from_clipboard_delta(before: Option<&str>, after: Option<&str>) -> Option<String> {
     match after {
         Some(a) if !a.is_empty() && Some(a) != before => Some(a.to_string()),
@@ -139,10 +145,35 @@ pub fn selection_from_clipboard_delta(before: Option<&str>, after: Option<&str>)
     }
 }
 
-/// Fallback selection capture: synthesize Cmd+C, read the clipboard, then
-/// restore the user's original clipboard. Returns the selected text, or `None`
-/// if nothing changed / the copy failed. macOS-only.
-#[cfg(target_os = "macos")]
+/// Marker written to the clipboard immediately before the synthetic copy.
+///
+/// Deliberately not empty: `set_text("")` is unreliable across platforms
+/// (some clipboards drop the entry entirely rather than storing an empty
+/// string), which would put us right back to guessing.
+const COPY_SENTINEL: &str = "\u{200B}echo-scribe-copy-probe\u{200B}";
+
+/// Pure decision helper: did the synthetic copy actually replace our sentinel?
+///
+/// This is the sound version of [`selection_from_clipboard_delta`]. Because we
+/// *wrote* the pre-state ourselves, "unchanged" is provable rather than
+/// inferred, so a clipboard whose pre-read failed can no longer be mistaken for
+/// a fresh selection. Fixes real Windows behaviour: `capture_selection` grabbed
+/// a URL copied minutes earlier and handed it to the editor as if the user had
+/// selected it.
+pub fn selection_from_sentinel(after: Option<&str>) -> Option<String> {
+    match after {
+        Some(a) if !a.is_empty() && a != COPY_SENTINEL => Some(a.to_string()),
+        _ => None,
+    }
+}
+
+/// Fallback selection capture: synthesize the platform copy chord, read the
+/// clipboard, then restore the user's original clipboard. Returns the selected
+/// text, or `None` if nothing changed / the copy failed.
+///
+/// Platform-neutral: only [`synthesize_cmd_c`] differs per OS (CoreGraphics on
+/// macOS, enigo elsewhere). On Windows this is the *only* selection path, since
+/// the AX-based `focus::capture_selection` has no Win32 equivalent yet.
 pub fn capture_selection_via_copy() -> Option<String> {
     use arboard::Clipboard;
     let mut clipboard = match Clipboard::new() {
@@ -153,27 +184,57 @@ pub fn capture_selection_via_copy() -> Option<String> {
         }
     };
     let before = clipboard.get_text().ok();
+
+    // Overwrite with a known marker so "nothing was copied" is provable. Without
+    // this, a failed `before` read (routine on Windows — the clipboard is one
+    // global resource that browsers and clipboard managers lock constantly) makes
+    // leftover content look like a brand-new selection.
+    if let Err(e) = clipboard.set_text(COPY_SENTINEL) {
+        warn!(target: "edit", ?e, "capture_selection_via_copy: failed to write probe sentinel");
+        return None;
+    }
+
     if let Err(e) = synthesize_cmd_c() {
-        warn!(target: "edit", ?e, "capture_selection_via_copy: Cmd+C synthesis failed");
+        warn!(target: "edit", ?e, "capture_selection_via_copy: copy synthesis failed");
+        restore_clipboard(&mut clipboard, before.as_deref());
         return None;
     }
     // Give the frontmost app time to service the copy and write the pasteboard.
     thread::sleep(Duration::from_millis(120));
     let after = clipboard.get_text().ok();
-    let result = selection_from_clipboard_delta(before.as_deref(), after.as_deref());
-    // Best-effort restore of the user's original clipboard.
-    if let Some(orig) = before {
-        if let Err(e) = clipboard.set_text(&orig) {
-            warn!(target: "edit", ?e, "capture_selection_via_copy: failed to restore clipboard");
-        }
+    let result = selection_from_sentinel(after.as_deref());
+    if result.is_none() {
+        info!(
+            target: "edit",
+            sentinel_intact = after.as_deref() == Some(COPY_SENTINEL),
+            after_readable = after.is_some(),
+            "capture_selection_via_copy: nothing was copied (no active selection?)"
+        );
     }
+    restore_clipboard(&mut clipboard, before.as_deref());
     result
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn capture_selection_via_copy() -> Option<String> {
-    None
+/// Put the user's clipboard back. Always attempted, including on the failure
+/// paths — we overwrote it with a sentinel, so bailing out early without this
+/// would leave the probe marker sitting in their clipboard.
+fn restore_clipboard(clipboard: &mut arboard::Clipboard, before: Option<&str>) {
+    match before {
+        Some(orig) => {
+            if let Err(e) = clipboard.set_text(orig) {
+                warn!(target: "edit", ?e, "capture_selection_via_copy: failed to restore clipboard");
+            }
+        }
+        None => {
+            // We never managed to read it, so we cannot put it back. Clearing is
+            // still better than leaving our sentinel behind.
+            if let Err(e) = clipboard.set_text("") {
+                warn!(target: "edit", ?e, "capture_selection_via_copy: failed to clear sentinel");
+            }
+        }
+    }
 }
+
 
 /// Synthesize Cmd+C via CoreGraphics (same deterministic approach as
 /// [`synthesize_cmd_v`], with the Command flag set directly on the keydown).
@@ -200,9 +261,62 @@ fn synthesize_cmd_c() -> Result<(), PasteError> {
     Ok(())
 }
 
+/// Synthesize Ctrl+C. Mirrors [`synthesize_cmd_v`]'s non-macOS enigo path so
+/// the two chords behave identically on Windows/Linux.
+#[cfg(not(target_os = "macos"))]
+fn synthesize_cmd_c() -> Result<(), PasteError> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| PasteError::Init(e.to_string()))?;
+    enigo
+        .key(Key::Control, Direction::Press)
+        .map_err(|e| PasteError::Keystroke(e.to_string()))?;
+    enigo
+        .key(Key::Unicode('c'), Direction::Click)
+        .map_err(|e| PasteError::Keystroke(e.to_string()))?;
+    enigo
+        .key(Key::Control, Direction::Release)
+        .map_err(|e| PasteError::Keystroke(e.to_string()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this replaces: a failed `before` read made stale clipboard
+    /// content look like a fresh selection. Observed on Windows as a URL copied
+    /// minutes earlier being handed to the selection editor.
+    #[test]
+    fn sentinel_intact_means_nothing_was_copied() {
+        assert_eq!(selection_from_sentinel(Some(COPY_SENTINEL)), None);
+    }
+
+    #[test]
+    fn sentinel_replaced_means_real_selection() {
+        assert_eq!(
+            selection_from_sentinel(Some("the highlighted sentence")),
+            Some("the highlighted sentence".to_string())
+        );
+    }
+
+    #[test]
+    fn sentinel_unreadable_or_empty_is_not_a_selection() {
+        assert_eq!(selection_from_sentinel(None), None);
+        assert_eq!(selection_from_sentinel(Some("")), None);
+    }
+
+    /// Regression guard on the old helper: it cannot distinguish stale content
+    /// from a real selection once `before` is unknown. Documents *why*
+    /// `capture_selection_via_copy` no longer uses it.
+    #[test]
+    fn clipboard_delta_is_unsound_without_a_known_before() {
+        assert_eq!(
+            selection_from_clipboard_delta(None, Some("https://github.com/")),
+            Some("https://github.com/".to_string()),
+            "documents the unsoundness that motivated the sentinel probe"
+        );
+    }
 
     #[test]
     fn paste_error_display_messages() {

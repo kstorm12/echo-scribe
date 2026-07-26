@@ -20,6 +20,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-shell = "2"
+# Cross-platform URL / mailto / path opening for voice actions. Replaces
+# shelling out to macOS `open`, which made launch_app/draft_email/open_url fail
+# with "program not found" on Windows.
+tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,6 +50,8 @@ tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
+# Keeps a second launch from stealing/losing the global hotkey registration.
+tauri-plugin-single-instance = "2"
 # ASR / Parakeet via ONNX Runtime. CPU-only — `ort-coreml` was dropped after
 # logs showed CoreML accepted only 15/39 encoder ops and 4/35 decoder ops, and
 # spent ~50s on first-run graph compilation while still running most of the
@@ -106,6 +112,16 @@ block2 = "0.6"
 # is observe-only and cannot do that.
 core-graphics = "0.24"
 core-foundation = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# UI Automation, for reading the focused control's text selection without
+# synthesizing Ctrl+C (see src/input/uia.rs). Win32 counterpart to the
+# objc2-application-services AXUIElement usage on macOS.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Non-macOS starts with a CPU-compatible llama.cpp baseline. GPU backends
