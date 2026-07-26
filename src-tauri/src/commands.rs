@@ -31,6 +31,7 @@ use crate::input::binding::{
     code_from_key, key_from_code, Binding, ModifierKind, ModifierSide, SerKey,
 };
 use crate::input::hotkeys::{spawn_listener, HotkeyEvent};
+use crate::input::trigger::HotkeyProblem;
 use crate::llm::{self, rag, GenerateRequest, Llm, LlmDownloadProgress, LlmModelEntry};
 use crate::permissions::{self, CameraAccessOutcome, MicAccessOutcome, PermissionsStatus, SettingsPane};
 use crate::settings::SettingsStore;
@@ -62,6 +63,12 @@ pub struct AppState {
     pub action_binding: Arc<RwLock<Binding>>,
     pub edit_selection_binding: Arc<RwLock<Binding>>,
     pub hotkey_started: AtomicBool,
+    /// Friendly, user-facing reasons the configured hotkeys couldn't be
+    /// registered (Windows/Linux only — macOS uses the event tap and never
+    /// registers anything). Refreshed on every `sync_hotkeys` call and read by
+    /// the settings UI via [`get_hotkey_problems`], so a shortcut that another
+    /// app already owns shows up in the UI instead of only in the log.
+    pub hotkey_problems: Arc<RwLock<Vec<HotkeyProblem>>>,
     /// When `true`, the coordinator drops Pressed/Released events. Toggled
     /// from the tray menu (Pause/Resume hotkeys). The hotkey listeners stay
     /// running so the toggle is instant — only the coordinator filters.
@@ -344,6 +351,36 @@ pub fn request_screen_recording_access() -> Result<bool, String> {
     Ok(granted)
 }
 
+/// Re-register the global shortcuts from the current bindings and store any
+/// user-facing problems for [`get_hotkey_problems`].
+///
+/// No-op on macOS, where the CGEventTap listeners read the shared `Binding`
+/// directly on every key event and so pick up rebinds with nothing to re-register.
+pub fn sync_hotkeys(state: &AppState, app: &AppHandle) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let problems = crate::input::trigger::sync_shortcuts(app, state);
+        if let Ok(mut guard) = state.hotkey_problems.write() {
+            *guard = problems;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (state, app);
+    }
+}
+
+/// Hotkeys that could not be registered (empty on macOS, and empty on
+/// Windows/Linux when everything registered cleanly).
+#[tauri::command]
+pub fn get_hotkey_problems(state: State<'_, AppState>) -> Vec<HotkeyProblem> {
+    state
+        .hotkey_problems
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn get_voice_at_cursor_binding(state: State<'_, AppState>) -> JsBinding {
     let b = state
@@ -357,6 +394,7 @@ pub fn get_voice_at_cursor_binding(state: State<'_, AppState>) -> JsBinding {
 #[tauri::command]
 pub fn update_voice_at_cursor_binding(
     state: State<'_, AppState>,
+    app: AppHandle,
     binding: JsBinding,
 ) -> Result<(), String> {
     let parsed: Binding = binding
@@ -366,11 +404,14 @@ pub fn update_voice_at_cursor_binding(
         .settings
         .set_voice_at_cursor_binding(parsed.clone())
         .map_err(|e| e.to_string())?;
-    let mut guard = state
-        .binding
-        .write()
-        .map_err(|_| "binding lock poisoned".to_string())?;
-    *guard = parsed;
+    {
+        let mut guard = state
+            .binding
+            .write()
+            .map_err(|_| "binding lock poisoned".to_string())?;
+        *guard = parsed;
+    }
+    sync_hotkeys(&state, &app);
     Ok(())
 }
 
@@ -387,6 +428,7 @@ pub fn get_log_capture_binding(state: State<'_, AppState>) -> JsBinding {
 #[tauri::command]
 pub fn update_log_capture_binding(
     state: State<'_, AppState>,
+    app: AppHandle,
     binding: JsBinding,
 ) -> Result<(), String> {
     let parsed: Binding = binding
@@ -396,11 +438,14 @@ pub fn update_log_capture_binding(
         .settings
         .set_log_capture_binding(parsed.clone())
         .map_err(|e| e.to_string())?;
-    let mut guard = state
-        .log_capture_binding
-        .write()
-        .map_err(|_| "binding lock poisoned".to_string())?;
-    *guard = parsed;
+    {
+        let mut guard = state
+            .log_capture_binding
+            .write()
+            .map_err(|_| "binding lock poisoned".to_string())?;
+        *guard = parsed;
+    }
+    sync_hotkeys(&state, &app);
     Ok(())
 }
 
@@ -415,7 +460,11 @@ pub fn get_action_binding(state: State<'_, AppState>) -> JsBinding {
 }
 
 #[tauri::command]
-pub fn update_action_binding(state: State<'_, AppState>, binding: JsBinding) -> Result<(), String> {
+pub fn update_action_binding(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    binding: JsBinding,
+) -> Result<(), String> {
     let parsed: Binding = binding
         .try_into()
         .map_err(|e: BindingConversionError| e.to_string())?;
@@ -423,11 +472,14 @@ pub fn update_action_binding(state: State<'_, AppState>, binding: JsBinding) -> 
         .settings
         .set_action_binding(parsed.clone())
         .map_err(|e| e.to_string())?;
-    let mut guard = state
-        .action_binding
-        .write()
-        .map_err(|_| "action_binding lock poisoned".to_string())?;
-    *guard = parsed;
+    {
+        let mut guard = state
+            .action_binding
+            .write()
+            .map_err(|_| "action_binding lock poisoned".to_string())?;
+        *guard = parsed;
+    }
+    sync_hotkeys(&state, &app);
     Ok(())
 }
 
@@ -444,6 +496,7 @@ pub fn get_edit_selection_binding(state: State<'_, AppState>) -> JsBinding {
 #[tauri::command]
 pub fn update_edit_selection_binding(
     state: State<'_, AppState>,
+    app: AppHandle,
     binding: JsBinding,
 ) -> Result<(), String> {
     let parsed: Binding = binding
@@ -453,11 +506,14 @@ pub fn update_edit_selection_binding(
         .settings
         .set_edit_selection_binding(parsed.clone())
         .map_err(|e| e.to_string())?;
-    let mut guard = state
-        .edit_selection_binding
-        .write()
-        .map_err(|_| "edit_selection_binding lock poisoned".to_string())?;
-    *guard = parsed;
+    {
+        let mut guard = state
+            .edit_selection_binding
+            .write()
+            .map_err(|_| "edit_selection_binding lock poisoned".to_string())?;
+        *guard = parsed;
+    }
+    sync_hotkeys(&state, &app);
     Ok(())
 }
 
@@ -705,16 +761,10 @@ pub fn ensure_pipeline_started(state: &AppState, app: &AppHandle) {
     spawn_listener(Arc::clone(&state.edit_selection_binding), es_tx, Arc::clone(&state.rebinding));
 
     // macOS drives the coordinator from the CGEventTap listeners above.
-    // Non-macOS has no tap, so register the global-shortcut trigger.
-    #[cfg(not(target_os = "macos"))]
-    {
-        if let Err(e) = crate::input::trigger::register_default_dictation_shortcut(
-            app,
-            coord_tx.clone(),
-        ) {
-            tracing::warn!(target: "trigger", %e, "dictation hotkey unavailable");
-        }
-    }
+    // Non-macOS has no tap, so register the configured bindings as global
+    // shortcuts. Must run after `coord_tx` is stored in state — the shortcut
+    // handlers forward into that channel.
+    sync_hotkeys(state, app);
 
     // Adapter tasks: tag + forward into the coordinator channel. We use
     // `tokio::spawn` rather than a dedicated thread because these are pure

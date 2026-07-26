@@ -46,6 +46,8 @@ tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
+# Keeps a second launch from stealing/losing the global hotkey registration.
+tauri-plugin-single-instance = "2"
 # ASR / Parakeet via ONNX Runtime. CPU-only — `ort-coreml` was dropped after
 # logs showed CoreML accepted only 15/39 encoder ops and 4/35 decoder ops, and
 # spent ~50s on first-run graph compilation while still running most of the

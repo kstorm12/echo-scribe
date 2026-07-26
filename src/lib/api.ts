@@ -70,6 +70,14 @@ export const requestScreenRecordingAccess = (): Promise<boolean> =>
 export const getVoiceAtCursorBinding = (): Promise<JsBinding> =>
   invoke("get_voice_at_cursor_binding");
 
+/** A configured hotkey the OS refused to register, tagged by action slug. */
+export type HotkeyProblem = { action: string; message: string };
+
+// Always empty on macOS (the event tap registers nothing); on Windows/Linux a
+// combination another app already owns shows up here.
+export const getHotkeyProblems = (): Promise<HotkeyProblem[]> =>
+  invoke("get_hotkey_problems");
+
 export const updateVoiceAtCursorBinding = (binding: JsBinding): Promise<void> =>
   invoke("update_voice_at_cursor_binding", { binding });
 

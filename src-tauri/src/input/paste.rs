@@ -139,10 +139,13 @@ pub fn selection_from_clipboard_delta(before: Option<&str>, after: Option<&str>)
     }
 }
 
-/// Fallback selection capture: synthesize Cmd+C, read the clipboard, then
-/// restore the user's original clipboard. Returns the selected text, or `None`
-/// if nothing changed / the copy failed. macOS-only.
-#[cfg(target_os = "macos")]
+/// Fallback selection capture: synthesize the platform copy chord, read the
+/// clipboard, then restore the user's original clipboard. Returns the selected
+/// text, or `None` if nothing changed / the copy failed.
+///
+/// Platform-neutral: only [`synthesize_cmd_c`] differs per OS (CoreGraphics on
+/// macOS, enigo elsewhere). On Windows this is the *only* selection path, since
+/// the AX-based `focus::capture_selection` has no Win32 equivalent yet.
 pub fn capture_selection_via_copy() -> Option<String> {
     use arboard::Clipboard;
     let mut clipboard = match Clipboard::new() {
@@ -170,10 +173,6 @@ pub fn capture_selection_via_copy() -> Option<String> {
     result
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn capture_selection_via_copy() -> Option<String> {
-    None
-}
 
 /// Synthesize Cmd+C via CoreGraphics (same deterministic approach as
 /// [`synthesize_cmd_v`], with the Command flag set directly on the keydown).
@@ -197,6 +196,25 @@ fn synthesize_cmd_c() -> Result<(), PasteError> {
         .map_err(|_| PasteError::Keystroke("failed to create C keyup event".into()))?;
     c_up.post(CGEventTapLocation::Session);
 
+    Ok(())
+}
+
+/// Synthesize Ctrl+C. Mirrors [`synthesize_cmd_v`]'s non-macOS enigo path so
+/// the two chords behave identically on Windows/Linux.
+#[cfg(not(target_os = "macos"))]
+fn synthesize_cmd_c() -> Result<(), PasteError> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| PasteError::Init(e.to_string()))?;
+    enigo
+        .key(Key::Control, Direction::Press)
+        .map_err(|e| PasteError::Keystroke(e.to_string()))?;
+    enigo
+        .key(Key::Unicode('c'), Direction::Click)
+        .map_err(|e| PasteError::Keystroke(e.to_string()))?;
+    enigo
+        .key(Key::Control, Direction::Release)
+        .map_err(|e| PasteError::Keystroke(e.to_string()))?;
     Ok(())
 }
 

@@ -260,8 +260,19 @@ pub fn capture_selection(element: Option<&FocusElement>) -> Option<SelectionSnap
     None
 }
 
+/// Capture the current text selection without Accessibility.
+///
+/// Windows/Linux have no `AXSelectedText` equivalent wired up (the `FocusElement`
+/// stubs return `None`), so the synthetic-copy + clipboard-delta path is the only
+/// one available — and it is enough to make the edit-selection hotkey functional
+/// rather than registering and then silently doing nothing.
 #[cfg(not(target_os = "macos"))]
 pub fn capture_selection(_element: Option<&FocusElement>) -> Option<SelectionSnapshot> {
+    if let Some(text) = crate::input::paste::capture_selection_via_copy() {
+        tracing::info!(target: "edit", chars = text.len(), "capture_selection: via Ctrl+C fallback");
+        return Some(SelectionSnapshot { text, method: SelectionMethod::Copy });
+    }
+    tracing::info!(target: "edit", "capture_selection: no selection found (clipboard unchanged)");
     None
 }
 
