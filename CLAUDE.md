@@ -9,7 +9,9 @@ Build features so failures are *debuggable without a rebuild*. This is not optio
 - **HTTP/IPC boundaries:** check `resp.status().is_success()` before parsing, and put the response body in the error so a 401/403/quota failure reads as itself, not a generic "missing field". Same for subprocess: capture stderr and surface the structured error kind.
 - **Diagnose with logs, not hypotheses.** If a bug's cause isn't provable from data in hand, add the logging that would capture it, have the user reproduce, then fix from what the logs show. Don't guess-and-rebuild in a loop.
 
-## Build + reinstall workflow (macOS)
+## Build + reinstall workflow (macOS only)
+
+As of 2026-09-11 the dev machine is Omarchy Linux (rebuilt from Windows 11 on 2026-09-01). The macOS steps below (codesign, tccutil, `/Applications` copy, `.app` bundles) are not runnable here; they are kept for when a Mac is available. HEAD is on branch `feat/windows-voice-actions`. Windows path: `docs/WINDOWS.md` describes a work-in-progress NSIS installer built by the GitHub Actions **Windows** workflow (`src-tauri/tauri.windows.conf.json`, targets `nsis`); no fully supported Windows release yet. No Linux build path documented.
 
 **Signing identity (stable — this is why permissions now persist).** `tauri.conf.json` → `bundle.macOS.signingIdentity` is set to the SHA-1 `F6FD1D39BE4E52054A6B72E1EC5E90A03F5E5B77`, a self-signed **"Echo Scribe Local Dev"** code-signing identity in the login keychain. Because every build is signed with the *same* cert, its designated requirement is constant (`identifier "com.echoscribe.app" and certificate root = H"f6fd…"`), so macOS keeps TCC grants (including Screen Recording) across reinstalls — no more per-rebuild re-granting. Do **not** revert the committed config to `"-"` (ad-hoc), which changes the signature every build and drops grants.
 
@@ -79,6 +81,9 @@ bun run test:e2e
 # blocks publishing on failure. Locally (after a build):
 tar -czf EchoScribe-aarch64.tar.gz -C src-tauri/target/release/bundle/macos "Echo Scribe.app"
 bash scripts/smoke-test.sh EchoScribe-aarch64.tar.gz
+
+# Installer test: exercises install.sh against a fixture tarball in a throwaway dir
+bun run test:installer   # = bash scripts/test-installer.sh
 ```
 
 Don't run `bun tauri dev` from a subagent — it spawns a window that won't terminate cleanly.
