@@ -59,6 +59,7 @@ use crate::commands::{
     get_format_templates, get_item, get_llm_unload_secs, get_log_capture_binding,
     get_mute_while_recording, get_onboarding_completed, get_project_auto_tagging_enabled,
     get_recording_project, get_screenrec_audio_prefs, get_trigger_word_routing_enabled,
+    get_hotkey_problems,
     get_voice_at_cursor_binding,
     hide_countdown_overlay,
     import_editor_background,
@@ -107,9 +108,20 @@ use crate::ui::tray::TrayHandle;
 /// Resolve the directory crash logs are rotated into. Public so that the
 /// `diagnostics_log_dir` Tauri command (Settings → Diagnostics) can return
 /// the same path the appender writes to.
+#[cfg(target_os = "macos")]
 pub fn log_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .map(|h| h.join("Library/Logs/EchoScribe"))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Non-macOS hosts have no `~/Library`; use the platform's local-data dir
+/// (`%LOCALAPPDATA%\EchoScribe\logs` on Windows) so logs land somewhere the
+/// OS actually expects rather than in a macOS-shaped path under the home dir.
+#[cfg(not(target_os = "macos"))]
+pub fn log_dir() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .map(|d| d.join("EchoScribe").join("logs"))
         .unwrap_or_else(std::env::temp_dir)
 }
 
@@ -117,6 +129,7 @@ pub fn log_dir() -> std::path::PathBuf {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn log_dir_resolves_under_library_logs_when_home_present() {
         // We can't easily mock `dirs::home_dir()`, but on the host where
@@ -133,6 +146,24 @@ mod tests {
             assert!(s.ends_with("Library/Logs/EchoScribe"), "got {s}");
         } else {
             // No home dir on this host: we fall back to the temp dir.
+            assert_eq!(p, std::env::temp_dir());
+        }
+    }
+
+    /// Windows/Linux must not put logs in a macOS-shaped `~/Library` path.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn log_dir_resolves_under_local_data_dir() {
+        let p = log_dir();
+        let s = p.to_string_lossy();
+        if let Some(local) = dirs::data_local_dir() {
+            assert!(
+                s.starts_with(local.to_string_lossy().as_ref()),
+                "log dir {s} should sit under local data dir {}",
+                local.display()
+            );
+            assert!(!s.contains("Library"), "got a macOS-shaped path: {s}");
+        } else {
             assert_eq!(p, std::env::temp_dir());
         }
     }
@@ -176,6 +207,19 @@ pub fn run() {
     info!(accelerator = %OrtAccelerator::CpuOnly, "ORT accelerator selected");
 
     tauri::Builder::default()
+        // Must be registered first (plugin requirement). Without it a second
+        // launch starts a second process that loses the global-shortcut race
+        // against the first — on Windows `RegisterHotKey` is first-come-
+        // first-served, so the new instance silently has NO working hotkey.
+        // Focus the existing window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -206,6 +250,7 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
@@ -230,6 +275,7 @@ pub fn run() {
             request_screen_recording_access,
             get_voice_at_cursor_binding,
             update_voice_at_cursor_binding,
+            get_hotkey_problems,
             get_log_capture_binding,
             update_log_capture_binding,
             get_action_binding,
@@ -678,6 +724,7 @@ pub fn run() {
                 action_binding,
                 edit_selection_binding,
                 hotkey_started: AtomicBool::new(false),
+                hotkey_problems: Arc::new(std::sync::RwLock::new(Vec::new())),
                 paused_hotkeys: Arc::clone(&paused_hotkeys),
                 rebinding,
                 coord_tx: Mutex::new(None),

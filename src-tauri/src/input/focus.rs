@@ -91,7 +91,9 @@ impl FocusElement {
 /// How a text selection was captured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionMethod {
-    /// Read directly via the Accessibility `AXSelectedText` attribute.
+    /// Read directly through the platform accessibility API — `AXSelectedText`
+    /// on macOS, UI Automation `TextPattern` on Windows. Clean: no keystrokes
+    /// synthesized, clipboard untouched.
     Ax,
     /// Read by synthesizing Cmd+C and reading the clipboard.
     Copy,
@@ -260,8 +262,35 @@ pub fn capture_selection(element: Option<&FocusElement>) -> Option<SelectionSnap
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Capture the current text selection via UI Automation's `TextPattern`, the
+/// Win32 counterpart to `AXSelectedText`.
+///
+/// Deliberately does NOT fall back to a synthetic Ctrl+C. We capture at
+/// hotkey-PRESS time, while the user is still holding the trigger; enigo's
+/// chord ends by releasing Ctrl, so the still-held primary key stops matching
+/// the `RegisterHotKey` combination and its auto-repeat is typed into the
+/// user's document. That path was shipped and reverted (commit 9856d20); there
+/// is no keystroke-based variant that doesn't corrupt text. See
+/// [`crate::input::uia`] for the details and for which controls expose
+/// `TextPattern`.
+#[cfg(target_os = "windows")]
 pub fn capture_selection(_element: Option<&FocusElement>) -> Option<SelectionSnapshot> {
+    let text = crate::input::uia::selected_text()?;
+    tracing::info!(target: "edit", chars = text.len(), "capture_selection: via UIA TextPattern");
+    Some(SelectionSnapshot { text, method: SelectionMethod::Ax })
+}
+
+/// No accessibility-based selection reader on this platform. Refusing beats a
+/// synthetic copy, which leaks the held hotkey's auto-repeat into the focused
+/// app (see the Windows arm above); the coordinator aborts cleanly and tells
+/// the user there is nothing to edit.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn capture_selection(_element: Option<&FocusElement>) -> Option<SelectionSnapshot> {
+    tracing::warn!(
+        target: "edit",
+        "capture_selection: not supported on this platform — needs an \
+         accessibility selection reader (AXSelectedText / UIA TextPattern)"
+    );
     None
 }
 

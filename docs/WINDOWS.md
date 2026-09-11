@@ -40,9 +40,9 @@ calendar matching can then be added back with Windows-native implementations.
 Minimum porting checklist:
 
 1. Move macOS-only dependencies behind `cfg(target_os = "macos")`.
-2. Add Windows equivalents or feature fallbacks for global hotkeys, focus context,
-   microphone permission UX, meeting audio capture, screen recording, calendar
-   lookup, and credential storage.
+2. Add Windows equivalents or feature fallbacks for focus context, microphone
+   permission UX, meeting audio capture, screen recording, calendar lookup, and
+   credential storage. (Global hotkeys are done — see "Hotkeys on Windows" below.)
 3. Replace the unconditional Metal LLM build with a Windows-compatible llama.cpp
    backend, likely CPU first, then optional CUDA/Vulkan later.
 4. Add Windows sidecar binaries or disable the features that require the current
@@ -50,6 +50,26 @@ Minimum porting checklist:
 5. Build and test on a real Windows machine or a Windows CI runner.
 6. Publish a Windows installer from Tauri, typically an NSIS `*-setup.exe` or an
    MSI package.
+
+## Hotkeys on Windows
+
+Windows has no CGEventTap, so the configured bindings are registered with the
+global-shortcut plugin (`RegisterHotKey`) instead of the macOS event tap. Two
+consequences the UI has to live with:
+
+- **A shortcut must contain a regular key.** `RegisterHotKey` cannot register a
+  bare modifier, so the macOS default (Right Control on its own) is not
+  expressible. Settings reports this rather than silently doing nothing.
+- **Left/right modifiers are not distinguished.** "Right Alt + Slash" registers
+  as "Alt + Slash".
+- **Registration is first-come-first-served across the whole system.** If another
+  running application already owns the combination, registration fails and Echo
+  Scribe surfaces the problem in Settings next to that shortcut.
+
+Because a second instance of the app would lose that race against the first and
+end up with no working hotkey at all, the app registers
+`tauri-plugin-single-instance` and focuses the existing window instead of
+starting a second process.
 
 ## Validation commands for a Windows developer
 

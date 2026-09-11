@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
 use tracing::{debug, info, warn};
 
 
@@ -143,7 +143,59 @@ fn parse_raw_action(raw: &str) -> Result<ActionCommand, String> {
     serde_json::from_str::<ActionCommand>(slice).map_err(|e| e.to_string())
 }
 
-/// Execute a classified action on macOS on behalf of the user
+/// Launch a desktop application by user-facing name.
+///
+/// This is the one action with no cross-platform primitive: `open -a` is a macOS
+/// idiom, and the opener plugin opens *paths and URLs*, not app names. So it
+/// stays cfg-split.
+#[cfg(target_os = "macos")]
+fn launch_app_by_name(app_name: &str) -> Result<(), ActionError> {
+    let status = std::process::Command::new("open")
+        .arg("-a")
+        .arg(app_name)
+        .status()
+        .map_err(|e| ActionError::Execute(e.to_string()))?;
+    if !status.success() {
+        return Err(ActionError::Execute(format!(
+            "Failed to launch app '{app_name}'. Check if it is installed."
+        )));
+    }
+    Ok(())
+}
+
+/// Windows equivalent of `open -a`: `start` resolves names registered under
+/// App Paths (e.g. "chrome", "notepad", "excel") as well as anything on PATH.
+///
+/// The empty `""` argument is the window *title* that `start` otherwise steals
+/// from a quoted program name — omit it and `start "Chrome"` opens a console
+/// titled "Chrome" instead of launching anything.
+#[cfg(target_os = "windows")]
+fn launch_app_by_name(app_name: &str) -> Result<(), ActionError> {
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", app_name])
+        .status()
+        .map_err(|e| ActionError::Execute(e.to_string()))?;
+    if !status.success() {
+        return Err(ActionError::Execute(format!(
+            "Failed to launch app '{app_name}'. Check if it is installed."
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn launch_app_by_name(app_name: &str) -> Result<(), ActionError> {
+    Err(ActionError::Execute(format!(
+        "Launching applications by name isn't supported on this platform (wanted '{app_name}')."
+    )))
+}
+
+/// Execute a classified action on behalf of the user.
+///
+/// URLs and `mailto:` drafts go through the opener plugin, which is
+/// cross-platform and — unlike shelling out to `cmd /C start` on Windows —
+/// does not treat the `&` between `?subject=` and `&body=` as a command
+/// separator and silently truncate the email.
 pub fn execute_action(app: &AppHandle, cmd: &ActionCommand) -> Result<String, ActionError> {
     let action_type = cmd.action_type.as_deref().unwrap_or("");
     info!(action_type, "executing voice action command");
@@ -154,19 +206,7 @@ pub fn execute_action(app: &AppHandle, cmd: &ActionCommand) -> Result<String, Ac
                 ActionError::Execute("launch_app missing app_name".to_string())
             })?;
             
-            // On macOS, `open -a` is standard, robust, and handles spaces perfectly.
-            let status = Command::new("open")
-                .arg("-a")
-                .arg(app_name)
-                .status()
-                .map_err(|e| ActionError::Execute(e.to_string()))?;
-
-            if !status.success() {
-                return Err(ActionError::Execute(format!(
-                    "Failed to launch app '{}'. Check if it is installed.",
-                    app_name
-                )));
-            }
+            launch_app_by_name(app_name)?;
 
             // Increment action stats
             increment_stats(app)?;
@@ -190,14 +230,11 @@ pub fn execute_action(app: &AppHandle, cmd: &ActionCommand) -> Result<String, Ac
                 normalized_to, encoded_subject, encoded_body
             );
 
-            let status = Command::new("open")
-                .arg(&mailto_url)
-                .status()
-                .map_err(|e| ActionError::Execute(e.to_string()))?;
-
-            if !status.success() {
-                return Err(ActionError::Execute("Failed to open mail client draft".to_string()));
-            }
+            app.opener()
+                .open_url(&mailto_url, None::<&str>)
+                .map_err(|e| {
+                    ActionError::Execute(format!("Failed to open mail client draft: {e}"))
+                })?;
 
             increment_stats(app)?;
 
@@ -218,14 +255,11 @@ pub fn execute_action(app: &AppHandle, cmd: &ActionCommand) -> Result<String, Ac
                 sanitized_url = format!("https://{}", sanitized_url);
             }
 
-            let status = Command::new("open")
-                .arg(&sanitized_url)
-                .status()
-                .map_err(|e| ActionError::Execute(e.to_string()))?;
-
-            if !status.success() {
-                return Err(ActionError::Execute(format!("Failed to open URL '{}'", sanitized_url)));
-            }
+            app.opener()
+                .open_url(&sanitized_url, None::<&str>)
+                .map_err(|e| {
+                    ActionError::Execute(format!("Failed to open URL '{sanitized_url}': {e}"))
+                })?;
 
             increment_stats(app)?;
 

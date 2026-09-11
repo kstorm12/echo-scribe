@@ -160,6 +160,12 @@ pub fn spawn(
                         info!(?action, "hotkey Pressed dropped: paused via tray");
                         continue;
                     }
+                    // Everything between here and `recorder.start()` returning
+                    // is time the user hears the start cue but the microphone
+                    // is not yet capturing — i.e. speech that never reaches the
+                    // transcript. That silently eats the FIRST word, which is
+                    // where the trigger word lives.
+                    let pressed_at = std::time::Instant::now();
 
                     // Mid-recording upgrade: if LogCapture fires while
                     // VoiceAtCursor is already recording, promote the
@@ -270,6 +276,12 @@ pub fn spawn(
                         }
                         notify_recorder_failure(&app, &e, preferred.as_deref());
                     } else {
+                        info!(
+                            target: "trigger",
+                            ?action,
+                            press_to_capture_ms = pressed_at.elapsed().as_millis() as u64,
+                            "recorder live"
+                        );
                         if matches!(action, Action::VoiceAtCursor) {
                             let _ = app.emit("voice:recording_started", ());
                         }
@@ -849,6 +861,10 @@ async fn try_intercept_action(
         // Prefix-Based Routing
         if !trigger_enabled {
             // Option 2 fallback bypass: standard voice typing completely bypasses LLM
+            info!(
+                target: "trigger",
+                "trigger word routing is disabled in settings; pasting as plain text"
+            );
             return InterceptOutcome::Passthrough;
         }
 
@@ -872,6 +888,11 @@ async fn try_intercept_action(
 
         match matched_trigger {
             Some(len) => {
+                info!(
+                    target: "trigger",
+                    trigger = %trigger_lower,
+                    "trigger word matched; routing dictation to the action launcher"
+                );
                 if text_lower.len() == len {
                     String::new()
                 } else {
@@ -882,6 +903,21 @@ async fn try_intercept_action(
             }
             None => {
                 // No trigger prefix found: bypass the LLM entirely (instant paste!)
+                //
+                // Log what we actually saw. Without this, a miss is
+                // indistinguishable from "the hotkey never fired" in the log,
+                // and the two have completely different fixes: the trigger word
+                // is spoken FIRST, so it is exactly the word most likely to be
+                // clipped by microphone start-up latency. `head` is the prefix
+                // we compared, so a log showing `head="open google."` proves the
+                // word never reached the transcript rather than failing to match.
+                info!(
+                    target: "trigger",
+                    trigger = %trigger_lower,
+                    head = %text_lower.chars().take(24).collect::<String>(),
+                    chars = text_trimmed.len(),
+                    "no trigger word at start of dictation; pasting as plain text"
+                );
                 return InterceptOutcome::Passthrough;
             }
         }
